@@ -55,7 +55,7 @@ results/                   tables (CSV) and logs for deliverables 3–8
 figures/                   plots for deliverables 3, 5, 7, 8
 saved_models/              deliverable 5: the four chosen models (.joblib, scikit-learn 1.9.0)
 cache/                     CLA SPICE reference (expensive; delete to recompute)
-guide/, docs/              learning guide and the course hand-outs
+docs/                      course hand-outs
 work/                      scratch netlists / raw ngspice output (not tracked)
 ```
 
@@ -96,6 +96,6 @@ work/                      scratch netlists / raw ngspice output (not tracked)
 | Area | Owner |
 |---|---|
 | SPICE setup, data generation, data check | Samyak Soni |
-| Transistor ML models, training, ablation, learning guide | Udhav Malpani |
+| Transistor ML models, training, ablation | Udhav Malpani |
 | Gate and circuit validation, ML node-voltage solver, tests | Shriya Kansal |
 | Parity-checker validation, extra analyses, report | Satvik Shrivastava |

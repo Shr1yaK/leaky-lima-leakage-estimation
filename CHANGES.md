@@ -20,7 +20,7 @@
 - `config.NGSPICE` resolves `$NGSPICE`, then `ngspice` on PATH, then the old Windows path. `N_WORKERS` defaults to all cores.
 - `00_environment.py` writes `results/env.txt` with the simulator and package versions.
 - Added `requirements.txt` (scikit-learn pinned to 1.9.0, which the joblib files need), `README.md`, `run_all.sh` (fast mode and `--full`) and `tests/` (26 pytest invariants).
-- `work/` (SPICE scratch) and `__pycache__/` are not tracked. Course hand-outs are in `docs/course/`, the guide PDF in `docs/`.
+- `work/` (SPICE scratch) and `__pycache__/` are not tracked. Course hand-outs are in `docs/course/`.
 - The CLA SPICE reference cache now lives in the tracked `cache/` folder.
 - Verified on macOS with ngspice 45.2:
   - the v3 gate results reproduce exactly;
@@ -89,6 +89,5 @@ Old pickles still load: new attributes default to v3 behaviour through `getattr`
    - SPICE cache: `cache/parity8_spice.pkl.xz`, 0.6 MB (gate outputs only).
 6. **Ablation result** (fair version): predicting terminal currents directly is about 25× worse in median error than the bipole model. The learning curve flattens at 2,000–4,000 uniform samples per case.
 
-## Report and guide
+## Report
 - `report/build_report.py` builds the typed report (deliverable 10) from `results/` into `report/Leaky_Lima_Report.pdf`. It uses Chrome or Playwright's Chromium for the PDF.
-- `guide/` has been rebuilt for v4: a version 3 → 4 chapter, the levels-aware hierarchy, and updated viva answers.
