@@ -1,0 +1,2 @@
+# keep every file byte-identical on all platforms
+* -text
