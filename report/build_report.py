@@ -243,30 +243,95 @@ def build():
     hier_s = float(log_value("circuit_log.txt", r"predictions: ([0-9.]+)s", "nan"))
     extras = (R / "extras_summary.txt").read_text() if (R / "extras_summary.txt").exists() else ""
 
+    # ---- values quoted in the text (all computed from results/ and data/) ----
+    ivdd_lo, ivdd_hi = gr.ivdd_med_err_pct.min(), gr.ivdd_med_err_pct.max()
+    u_off = pd.read_csv(config.DATA_DIR / "nmos_off.csv")
+    n_rail_uniform = int(((u_off.vs < 0.02 * u_off.vdd) & (u_off.vd > 0.98 * u_off.vdd)).sum())
+    dep_med = {c: pd.read_csv(config.DATA_DIR / f"{c}_deploy.csv")[["id", "ib"]].abs().median()
+               for c in ("nmos_off", "pmos_off")}
+    chi = ch.set_index("case")
+    cmp_rows = []
+    for case_ in CASE:
+        g_ = mc[mc.case == case_].set_index("model")
+        m_, o_ = g_.loc["mlp"], g_.drop("mlp")
+        for c_ in CUR:
+            cmp_rows.append(dict(case=case_, cur=c_, med=o_[f"{c_}_med%"].min() / m_[f"{c_}_med%"],
+                                 p95=o_[f"{c_}_p95%"].min() / m_[f"{c_}_p95%"],
+                                 best_med=o_[f"{c_}_med%"].idxmin()))
+    cmp = pd.DataFrame(cmp_rows)
+    cmp_better = cmp[cmp["med"] < 1]
+    if len(cmp_better):
+        cmp_text = (f"The MLP has a higher median error than another family in {len(cmp_better)} of the 16 combinations: "
+                    + "; ".join(f"{CASE[r.case]} I<sub>{r.cur[1]}</sub> ({FAM[r.best_med]}, ratio {r.med:.2f})"
+                                for r in cmp_better.itertuples()) + ".")
+        for case_ in cmp_better.case.unique():
+            top_ = cmp[cmp.case == case_].sort_values("med").iloc[-1]
+            cmp_text += (f" In {CASE[case_]}, the largest median margin of the MLP is on "
+                         f"I<sub>{top_.cur[1]}</sub> ({top_.med:.1f}&times;).")
+    else:
+        cmp_text = "The MLP has the lowest median error in all 16 combinations."
+    poly_ib = mc[mc.model == "poly_ridge"]["ib_med%"]
+    n64 = int(ch.hparams.str.contains(r"\(64,").sum())
+    test_med_max = ch[[f"{c}_med%" for c in CUR]].to_numpy().max()
+    dep_idis = chi[["deploy_id_med%", "deploy_is_med%"]].max(axis=1)
+    dep_idis_max, dep_idis_arg, n_dep_below1 = dep_idis.max(), dep_idis.idxmax(), int((dep_idis < 1).sum())
+    sm = gr.set_index(["gate", "inputs"]).spice_median
+    top4 = gr.sort_values("p95_err_pct", ascending=False).head(4)
+    p95_lo, p95_hi = gr.p95_err_pct.min(), gr.p95_err_pct.max()
+    pcols = [c for c in corners.columns if c not in ("vdd", "temp")]
+    r_t, r_v = gs.ae.corr(gs.temp), gs.ae.corr(gs.vdd)
+    r_proc = max(abs(gs.e.corr(gs[c])) for c in pcols)
+    r_proc_abs = max(abs(gs.ae.corr(gs[c])) for c in pcols)
+    wc = max(((r.case, c, r[f"{c}_p95%"]) for _, r in ch.iterrows() for c in CUR), key=lambda t: t[2])
+    train_s = log_value("train_log.txt", r"done in ([0-9.]+)s")
+    n_sub = log_value("train_log.txt", r"training (\d+) sub-models")
+    _sf = R / "extras_sensitivity.csv"
+    sv = pd.read_csv(_sf).set_index("case").ratio_to_nominal if _sf.exists() else None
+    sv_small = (100 * max(abs(v - 1) for k, v in sv.items() if any(x in k for x in ("toxe", "u0", "xj")))
+                if sv is not None else float("nan"))
+    _mf = R / "extras_mechanisms.csv"
+    mech0 = pd.read_csv(_mf, dtype={"vector": str}) if _mf.exists() else None
+    if mech0 is not None:
+        _t = mech0.temp.unique()[np.argmin(np.abs(mech0.temp.unique() - 25))]
+        _m25 = mech0[mech0.temp == _t]
+        tun_cold = 100 * mech0[mech0.temp == mech0.temp.min()].tunnelling_frac.mean()
+        tun_hot = 100 * mech0[mech0.temp == mech0.temp.max()].tunnelling_frac.mean()
+        tun_stack = [100 * _m25[(_m25.gate == g) & (_m25.vector == v)].tunnelling_frac.iloc[0]
+                     for g, v in (("NAND2", "00"), ("NOR2", "11"))]
+    else:
+        tun_cold = tun_hot = float("nan")
+        tun_stack = [float("nan")] * 2
+    platform = H.escape(envd.get("platform", "?"))
+    cores = envd.get("cpu cores used", "?")
+
     S = []   # html sections
 
     # ---------------------------------------------------------------- title
     S.append(f"""
 <header>
-<p class="course">Digital VLSI Design &mdash; Course Project</p>
+<p class="course">Digital VLSI Design: Course Project</p>
 <h1>ML-Driven PVT-Aware Leakage Estimation</h1>
 <p class="sub">Team 1 &ldquo;Leaky Lima&rdquo; &middot; {config.TECH.replace('_', ' ')} PTM &middot;
 VDD<sub>nom</sub> = {config.VDD_NOM:.1f} V &middot; 3-bit carry-lookahead adder</p>
-<p class="sub">Shriya Kansal &middot; Udhav Malpani &middot; Samyak Soni &middot; Satvik Srivastava</p>
+<p class="sub">Samyak Soni (2024112004) &middot; Satvik Shrivastava (2024102029)</p>
+<p class="sub">Shriya Kansal (2024102075) &middot; Udhav Malpani (2024112009)</p>
+<p class="sub">Repository: <a href="https://github.com/Shr1yaK/leaky-lima-leakage-estimation/">https://github.com/Shr1yaK/leaky-lima-leakage-estimation/</a></p>
 </header>
 <div class="abstract"><b>Summary.</b>
-Four neural-network transistor models (NMOS/PMOS &times; ON/OFF) predict all four terminal
-currents of a 16&nbsp;nm FET under process, voltage and temperature variation. Composed into
-logic gates, they reproduce 3,600 SPICE gate simulations with a
-<b>mean accuracy of {p(gate_acc)}&nbsp;%</b> (median error {p(np.median(rel))}&nbsp;%, 95th percentile
-{p(np.quantile(rel, .95))}&nbsp;%). Solving the internal node voltages with the same models instead of
-taking them from SPICE gives {p(gate_acc_solved)}&nbsp;%.
-On the 204-transistor CLA (25,600 SPICE simulations) the hierarchical sum asked for in the brief
-reaches {p(acc['ml_gate_sum'])}&nbsp;%. Its error is almost entirely due to the hierarchy itself
-(isolated gates with ideal 0/VDD inputs), not the ML: the same sum of <i>SPICE</i> gate leakages is off by
-{p(hier_err.bias_pct)}&nbsp;%. A levels-aware hierarchy, which feeds each gate the ML-predicted output voltage
-of its driver, removes this bias and reaches <b>{p(acc['ml_levels'])}&nbsp;% mean accuracy</b> on the CLA
-(median error {p(lev.med_err_pct)}&nbsp;%), with no SPICE voltage used anywhere.
+We trained four neural-network models (NMOS and PMOS, ON and OFF) that estimate the four terminal
+currents of a 16&nbsp;nm transistor under process, voltage and temperature variation. We combined them into
+the five library gates and compared the estimated leakage with ngspice for 3,600 gate simulations. The
+<b>mean accuracy is {p(gate_acc)}&nbsp;%</b> (median error {p(np.median(rel))}&nbsp;%, 95th percentile
+{p(np.quantile(rel, .95))}&nbsp;%). When the same models solve the internal node voltages, with no SPICE voltage
+as input, the mean accuracy is {p(gate_acc_solved)}&nbsp;%.
+For the 204-transistor 3-bit carry-lookahead adder (CLA, 25,600 ngspice simulations), the hierarchical sum
+that the brief specifies has a mean accuracy of {p(acc['ml_gate_sum'])}&nbsp;% (median error
+{p(hml.med_err_pct)}&nbsp;%, bias {hml.bias_pct:+.2f}&nbsp;%). The sum of the ngspice gate leakages has a bias of
+{hier_err.bias_pct:+.2f}&nbsp;% against the ngspice circuit, so most of this error comes from the hierarchy. The ML
+models add a median error of {p(mlerr.med_err_pct)}&nbsp;%.
+In an extension (Section 7.2), each gate receives the estimated output voltage of its driver instead of an
+ideal 0 or VDD. The CLA <b>mean accuracy is then {p(acc['ml_levels'])}&nbsp;%</b> (median error
+{p(lev.med_err_pct)}&nbsp;%). Section 7.9 applies both hierarchies to the 8-bit parity checker without retraining.
 </div>
 """)
 
@@ -284,13 +349,23 @@ of its driver, removes this bias and reaches <b>{p(acc['ml_levels'])}&nbsp;% mea
     ["Platform", H.escape(envd.get("platform", "?")) + f", {envd.get('cpu cores used','?')} cores"],
     ["SPICE options", f"<code>{config.SPICE_OPTIONS}</code> in every netlist"],
 ], columns=["Item", "Value"]), num=[])}
-<p><b>Leakage definition.</b> Gate and circuit leakage are the total static power divided by VDD,
-P<sub>static</sub>/VDD = &Sigma; V<sub>k</sub>I<sub>k</sub>/VDD over the supply <i>and</i> the input sources.
-The input sources matter because gate-tunnelling current into an input pin is real leakage that a driving gate
-must supply. The plain supply current I(VDD) is also recorded (<code>*_ivdd</code> columns) and gives the same conclusions.
-Terminal currents are positive <i>into</i> the device, so I<sub>d</sub>+I<sub>g</sub>+I<sub>s</sub>+I<sub>b</sub> = 0.</p>
-<p><b>Accuracy metric.</b> Mean accuracy = 100 % &minus; mean |ML/SPICE &minus; 1|.
-Medians, 95th percentiles and the worst case are reported alongside it.</p>
+<p><b>Evidence labels.</b> Each claim in this report carries one of four labels.
+<i>Simulated</i> values are ngspice operating-point (<code>.op</code>) results, produced with
+{H.escape(envd.get('simulator', '?').split(' : ')[0])} and the options line in the table above. <i>Estimated</i> values are outputs
+of the ML models and quantities computed from them, such as the leakage of a gate. <i>Measured</i> values are
+run times and counts taken from the logs, recorded on {platform} with {cores} cores. <i>Assumed</i> statements are
+design inputs and physical explanations that we did not test. Every error in this report compares an estimated
+value with the simulated value for the same case, so we do not repeat the labels for errors.</p>
+<p><b>Leakage definition.</b> We define the leakage of a gate or circuit as the total static power divided by
+VDD, P<sub>static</sub>/VDD = &Sigma; V<sub>k</sub>I<sub>k</sub>/VDD, summed over the supply and the input sources.
+We include the input sources because the driving gate must supply the gate-tunnelling current into an input pin,
+so this current is part of the leakage of the whole circuit. With this definition, the leakages of the gates add
+up to the leakage of the circuit. We also recorded the supply current I(VDD) (the <code>*_ivdd</code> columns of
+<code>results/gate_samples.csv</code>). Its median error per gate case ranges from {p(ivdd_lo)} to
+{p(ivdd_hi)}&nbsp;% (<code>gate_results.csv</code>). Terminal currents are positive into the device, so
+I<sub>d</sub>+I<sub>g</sub>+I<sub>s</sub>+I<sub>b</sub> = 0.</p>
+<p><b>Accuracy metric.</b> We define the mean accuracy of a group of simulations as 100&nbsp;% minus the mean of
+|ML/SPICE &minus; 1|. We report the median, the 95th percentile and the maximum of the same error next to it.</p>
 """)
 
     # ---------------------------------------------------------------- 2 data
@@ -304,39 +379,52 @@ Medians, 95th percentiles and the worst case are reported alongside it.</p>
     S.append(f"""
 <h2>2&nbsp; Data generation</h2>
 <h3>2.1 Sampling</h3>
-<p>For each of the four cases, 10,000 samples are drawn with every parameter independent. VDD is drawn first,
-uniform within &plusmn;10 % of nominal. V<sub>d</sub> and V<sub>s</sub> are uniform in [0, VDD], W is uniform in [1, 8]&times;L
-and T is uniform in [&minus;40, 125]&nbsp;&deg;C. The five process parameters (vth0, toxe, ndep, u0, xj) are each uniform within &plusmn;10 % of
-the model-card nominal, separately for NMOS and PMOS. V<sub>g</sub> and V<sub>b</sub> are fixed by the case (ON: V<sub>g</sub> = VDD for
-NMOS / 0 for PMOS; OFF: the opposite; body at the device's own rail). All draws use fixed seeds
-(<code>SEED_DATA = {config.SEED_DATA}</code>), and these 10,000-row files are deliverable 1.</p>
-<p>A uniform draw almost never puts a terminal on a rail: 3 in 10,000 samples are within 2 % of both rails.
-Inside a gate, however, the leaking transistor always has its source on a rail and its drain at the output (&asymp; 0 or VDD).
-We therefore add a <b>rail-focused supplement</b> of 5,000 samples per case. In it, V<sub>d</sub> and V<sub>s</sub> are exactly 0 or VDD
-one third of the time and otherwise follow an arcsine law that is dense near both rails. In half of these samples V<sub>g</sub> is moved up to
-10 % of VDD off its ideal level, because a gate driven by another gate sees a logic 0 a few tens of mV above ground.
-A third set of 2,000 samples per case at the gate widths and rail voltages (the <i>deployment check</i>) is used only for validation and test.
-No gate or circuit simulation is ever used for training or model selection.</p>
+<p>We drew 10,000 samples for each of the four cases, with every parameter independent. VDD was drawn first,
+uniform within &plusmn;10&nbsp;% of nominal. V<sub>d</sub> and V<sub>s</sub> are uniform in [0, VDD], W is uniform in
+[1, 8]&times;L and T is uniform in [&minus;40, 125]&nbsp;&deg;C. Each of the five process parameters (vth0, toxe,
+ndep, u0, xj) is uniform within &plusmn;10&nbsp;% of the model-card nominal, with separate draws for NMOS and PMOS.
+The case fixes V<sub>g</sub> and V<sub>b</sub>. In an ON device V<sub>g</sub> is VDD for NMOS and 0 for PMOS, and in an
+OFF device the reverse. The body is at the rail of the device type. All draws use fixed seeds
+(<code>SEED_DATA = {config.SEED_DATA}</code>). These 10,000-row files are deliverable 1.</p>
+<p>Uniform sampling rarely places a terminal on a rail: {n_rail_uniform} of the 10,000 NMOS OFF samples have
+V<sub>s</sub> within 2&nbsp;% of 0 and V<sub>d</sub> within 2&nbsp;% of VDD (measured count). In a gate, the leaking
+transistor has its source on a rail and its drain at the output, which is near 0 or VDD, so a model trained only
+on uniform samples has little data where the gates operate. We therefore added a rail-focused supplement of
+5,000 samples per case. In it, V<sub>d</sub> and V<sub>s</sub> are each exactly 0 or VDD in one third of the samples
+and otherwise follow an arcsine law, which is dense near both rails. In half of its samples we moved V<sub>g</sub>
+up to 10&nbsp;% of VDD away from its ideal level, because a gate driven by another gate sees a logic 0 a few tens
+of mV above ground. We also drew a deployment-check set of 2,000 samples per case at the gate widths
+(W<sub>n</sub> = 2L, W<sub>p</sub> = 4L) and at gate-like rail voltages, and used it only for validation and test. No
+gate or circuit simulation entered training or model selection.</p>
 <h3>2.2 Netlists</h3>
-<p>The single-FET netlist (one per case in <code>netlists/single_*.cir</code>) has one transistor and a separate voltage source on every
-terminal, so all four terminal currents are read directly through their sources. For speed, one ngspice process runs a whole batch of
-samples, changing the process parameters with <code>altermod</code> and the width, voltages and temperature with <code>alter</code> between
-<code>op</code> analyses. A self-check re-simulates samples as fresh standalone netlists and confirms the batch loop reproduces them. Besides the
-terminal currents, the BSIM4 internal current components (I<sub>ds</sub>, I<sub>gs</sub>, I<sub>gd</sub>, I<sub>gcs</sub>, I<sub>gcd</sub>, I<sub>gb</sub>,
-GIDL/GISL, I<sub>sub</sub>, junction currents) are recorded. They are regrouped into six physical <b>bipoles</b> (ds, gs, gd, gb, db, sb), which
-rebuild the four terminal currents exactly. Gate and circuit netlists are generated from the <i>same</i> transistor list that the ML side uses,
-so SPICE and ML cannot disagree about topology. Each starts from a logic-level <code>.nodeset</code>; the reason is given in &sect;6.</p>
+<p>The single-transistor netlist of each case (<code>netlists/single_*.cir</code>) holds one transistor with a
+separate voltage source on every terminal, so ngspice reports all four terminal currents directly. To avoid the
+start-up time of ngspice for every sample, one process runs a batch of samples. Between <code>.op</code> analyses it
+changes the process parameters with <code>altermod</code> and the width, voltages and temperature with
+<code>alter</code>. A self-check re-simulates samples as standalone netlists and reproduces the batch results
+(development log, <code>CHANGES.md</code>). We also recorded the internal BSIM4 current components
+(I<sub>ds</sub>, I<sub>gs</sub>, I<sub>gd</sub>, I<sub>gcs</sub>, I<sub>gcd</sub>, I<sub>gb</sub>, GIDL and GISL,
+I<sub>sub</sub> and the junction currents) and regrouped them into six physical <b>bipoles</b> (ds, gs, gd, gb, db,
+sb). The bipole currents rebuild the four terminal currents exactly. We generated the gate and circuit netlists
+from the same transistor list that the ML side uses, so SPICE and ML share one topology. Each gate and circuit
+simulation starts from a logic-level <code>.nodeset</code>; Section 6 gives the reason.</p>
 <h3>2.3 Splits</h3>
-<p>Each 10,000-row dataset is split 70/15/15 (7,000 train / 1,500 validation / 1,500 test) with <code>SEED_SPLIT = {config.SEED_SPLIT}</code>.
-The rail supplement is split the same way and its training part is added to the training data. The test parts are touched once, after model
-selection. Split indices are saved in <code>results/split_*.npz</code>.</p>
+<p>We split each 10,000-row dataset 70/15/15 (7,000 training, 1,500 validation and 1,500 test samples) with
+<code>SEED_SPLIT = {config.SEED_SPLIT}</code>. We split the rail supplement in the same way and added its training
+part to the training data. The test parts were used once, after model selection. The split indices are in
+<code>results/split_*.npz</code>.</p>
 <h3>2.4 Data check</h3>
-{table(kct, caption="Table 1. Kirchhoff check, |I<sub>d</sub>+I<sub>g</sub>+I<sub>s</sub>+I<sub>b</sub>| for each case (10,000 samples).")}
-<p>KCL closes to 10<sup>&minus;9</sup> of the largest terminal current in the median for every case. The largest relative residuals
-(PMOS OFF, up to {p(100*kc.set_index('case').loc['pmos_off','rel_max'],1)}&nbsp;%) occur only where every terminal current is around
-10<sup>&minus;15</sup>&nbsp;A. That is the simulator's absolute tolerance (abstol = 10<sup>&minus;18</sup>&nbsp;A amplified by the solver's
-convergence check), not a physical violation: the absolute residual never exceeds {sci(kc.abs_sum_max.max())}&nbsp;A.</p>
-{fig(F / 'data_check_trends.png', f"Trend checks. OFF current rises {p(tn['ioff_ratio_125C_vs_25C'])}&times; from 25 to 125&nbsp;&deg;C (sub-threshold current &prop; exp(&minus;V<sub>th</sub>/nV<sub>T</sub>), and V<sub>th</sub> falls with T). It falls to {p(tn['ioff_ratio_vth0_plus10pct'])}&times; with +10&nbsp;% vth0 (exponential in V<sub>th</sub>). Gate current falls to {p(tn['ig_ratio_toxe_plus10pct'])}&times; with +10&nbsp;% toxe (direct tunnelling is exponential in oxide thickness). All three trends match the physics.")}
+{table(kct, caption="Table 1. Kirchhoff check, |I<sub>d</sub>+I<sub>g</sub>+I<sub>s</sub>+I<sub>b</sub>| of the simulated terminal currents for each case (10,000 samples, ngspice).")}
+<p>For NMOS ON, NMOS OFF and PMOS ON, the median ratio |&Sigma;I| / max|I| is at most
+{sci(kc[kc.case != 'pmos_off'].rel_median.max())} and the 95th percentile is at most
+{sci(kc[kc.case != 'pmos_off'].rel_p95.max())} (simulated). For PMOS OFF, the median ratio is
+{sci(kc.set_index('case').loc['pmos_off','rel_median'])}, the 95th percentile
+{sci(kc.set_index('case').loc['pmos_off','rel_p95'])} and the maximum
+{p(100*kc.set_index('case').loc['pmos_off','rel_max'],1)}&nbsp;%. In the PMOS OFF samples with the largest ratios,
+every terminal current is near 10<sup>&minus;15</sup>&nbsp;A, and the residual is limited by the solver tolerances
+(assumed: abstol = 10<sup>&minus;18</sup>&nbsp;A, amplified by the convergence check). The largest absolute residual in
+any case is {sci(kc.abs_sum_max.max())}&nbsp;A.</p>
+{fig(F / 'data_check_trends.png', f"Trend checks on the simulated data. The OFF current is {p(tn['ioff_ratio_125C_vs_25C'])}&times; larger at 125&nbsp;&deg;C than at 25&nbsp;&deg;C. It falls to {p(tn['ioff_ratio_vth0_plus10pct'])}&times; of its value for +10&nbsp;% vth0, and the gate current falls to {p(tn['ig_ratio_toxe_plus10pct'])}&times; for +10&nbsp;% toxe. These directions agree with the physical models of leakage (assumed): sub-threshold current depends exponentially on V<sub>th</sub>, which falls with temperature, and direct tunnelling current depends exponentially on oxide thickness.")}
 """)
 
     # ---------------------------------------------------------------- 3 models
@@ -374,63 +462,79 @@ convergence check), not a physical violation: the absolute residual never exceed
     S.append(f"""
 <h2>3&nbsp; Models</h2>
 <h3>3.1 What is learned</h3>
-<p>Predicting the four terminal currents directly is hard: they span about 12 decades, change sign, and I<sub>s</sub> is often the
-difference of two much larger opposite currents. We use the structure of the device instead. Each of the six bipoles is a passive
-two-terminal element whose current always flows from its higher to its lower terminal. The model therefore learns its
-<b>conductance</b> G = I/V, as log G per unit width, and rebuilds the terminal currents with KCL:
-I<sub>d</sub> = I<sub>ds</sub> &minus; I<sub>gd</sub> + I<sub>db</sub>, and so on. This guarantees exact KCL, the correct sign of every current,
-and I = 0 at V = 0. Five sub-models per case share the inputs: channel (ds), gate-to-diffusion tunnelling (gs and gd, one model
-evaluated twice), gate-to-body, drain-junction and source-junction.</p>
-<p><b>Features</b> (per sub-model): VDD, T [K], log(W<sub>eff</sub>/L), &Delta;V<sub>g</sub>/V<sub>T</sub> (offset of the gate from its
-ideal level), the five process parameters relative to nominal, the two terminal voltages of the bipole, V/V<sub>T</sub>, log|V|, and
-three Arrhenius-type inputs 1/V<sub>T</sub>, V<sub>th0</sub>/V<sub>T</sub> and (VDD&minus;V<sub>th0</sub>)/V<sub>T</sub>, since
-sub-threshold current goes as exp(&minus;V<sub>th</sub>/nV<sub>T</sub>). The <b>width normalisation</b> follows BSIM4 for each mechanism.
-A width sweep in SPICE showed:</p>
+<p>The terminal currents change sign and span many orders of magnitude, and I<sub>s</sub> is often the difference of
+two much larger currents of opposite sign (simulated data). We assume that this makes a direct regression of the
+terminal currents inaccurate, because a model of log|I| cannot follow a sign change or a small difference of
+large terms; Section 3.4 measures the resulting error. We therefore split each transistor into six bipoles. Each
+bipole is a passive two-terminal element, and its current flows from its higher to its lower terminal. For each
+bipole the model learns the conductance G = I/V, in the form log G per unit width, and the terminal currents
+follow from KCL: I<sub>d</sub> = I<sub>ds</sub> &minus; I<sub>gd</sub> + I<sub>db</sub>, and so on. As a result, KCL holds
+exactly, every bipole current has the correct sign, and I = 0 at V = 0. Each case has five sub-models with shared
+inputs: channel (ds), gate-to-diffusion tunnelling (gs and gd, one model evaluated twice), gate-to-body, drain
+junction and source junction.</p>
+<p><b>Features.</b> Each sub-model takes VDD, T in K, log(W<sub>eff</sub>/L), &Delta;V<sub>g</sub>/V<sub>T</sub> (the
+offset of the gate from its ideal level), the five process parameters relative to nominal, the two terminal
+voltages of the bipole, V/V<sub>T</sub> and log|V|. It also takes three Arrhenius-type inputs, 1/V<sub>T</sub>,
+V<sub>th0</sub>/V<sub>T</sub> and (VDD&minus;V<sub>th0</sub>)/V<sub>T</sub>, because the sub-threshold current depends on
+exp(&minus;V<sub>th</sub>/nV<sub>T</sub>) (assumed physical model).</p>
+<p><b>Width normalisation.</b> We chose the width law of each mechanism from a nominal ngspice width sweep
+(simulated):</p>
 <ul>
-<li>The OFF channel scales with the <i>clamped</i> effective width. Below 20&nbsp;nm BSIM4 replaces W<sub>eff</sub> by
-2&middot;10<sup>&minus;8</sup>(4&middot;10<sup>&minus;8</sup>&minus;W<sub>eff</sub>)/(6&middot;10<sup>&minus;8</sup>&minus;2W<sub>eff</sub>), so a 1L device
-conducts as if it were 14&nbsp;nm wide, not 6&nbsp;nm.</li>
-<li>The ON channel scales with the drawn W.</li>
-<li>Tunnelling scales with W&minus;2&middot;wint.</li>
-<li>Junctions do not depend on W in this card.</li>
+<li>The OFF channel current scales with the clamped effective width. Below 20&nbsp;nm, BSIM4 replaces
+W<sub>eff</sub> by 2&middot;10<sup>&minus;8</sup>(4&middot;10<sup>&minus;8</sup>&minus;W<sub>eff</sub>)/(6&middot;10<sup>&minus;8</sup>&minus;2W<sub>eff</sub>).
+A 1L device (W<sub>eff</sub> = 6&nbsp;nm) then conducts like a 14&nbsp;nm device.</li>
+<li>The ON channel current scales with the drawn W.</li>
+<li>The tunnelling current scales with W&minus;2&middot;wint.</li>
+<li>The junction currents do not depend on W in this model card.</li>
 </ul>
-<p>Without the clamp the models carried a +2&nbsp;% bias into every gate.</p>
+<p>Without the clamp, the gate results carried a +2&nbsp;% bias (development log, <code>CHANGES.md</code>).</p>
 <h3>3.2 Model families and hyper-parameters</h3>
 <ul>
-<li><b>Polynomial + ridge</b>: standardised features, polynomial degree 3 or 4, ridge strength chosen by internal CV over 10<sup>&minus;8</sup>&ndash;1.</li>
-<li><b>Random forest</b>: 300 trees, max_features 0.6, fully grown.</li>
-<li><b>LightGBM</b>: 4,000 trees, learning rate 0.02, 31 or 63 leaves, row and column subsampling 0.8/0.9.</li>
-<li><b>MLP</b>: 3 hidden layers of 64 or 128 tanh units, L-BFGS, L2 = 10<sup>&minus;6</sup>, up to 5,000 iterations, standardised inputs
-and target. Five networks with different seeds are averaged in log-G space (a geometric mean of the conductances), which removes most of
-L-BFGS's run-to-run noise.</li>
+<li><b>Polynomial + ridge:</b> standardised features, polynomial degree 3 or 4, and a ridge strength chosen by
+internal cross-validation between 10<sup>&minus;8</sup> and 1.</li>
+<li><b>Random forest:</b> 300 trees, max_features 0.6, fully grown.</li>
+<li><b>LightGBM:</b> 4,000 trees, learning rate 0.02, 31 or 63 leaves, row subsampling 0.8 and column subsampling 0.9.</li>
+<li><b>MLP:</b> three hidden layers of 64 or 128 tanh units, L-BFGS, L2 = 10<sup>&minus;6</sup>, up to 5,000
+iterations, standardised inputs and target. We averaged five networks with different seeds in log-G space (a
+geometric mean of the conductances), which reduces the run-to-run noise of L-BFGS.</li>
 </ul>
-<p>All families use the same bipole targets and features. Selection uses the mean of the median-relative-error scores on three validation
-sets: uniform, rail-focused and deployment check. The table below is the brief's uniform validation set.</p>
+<p>All families use the same bipole targets and features. We selected the model of each case by a score computed
+on three validation sets: uniform, rail-focused and deployment check. For each set, the score is the mean over the
+four currents of (median + 95th percentile)/2 of the relative error, and the final score is the mean over the
+three sets.</p>
 {table(mct_t, num=cols[2:], caption="Table 2. Model comparison on the uniform validation set (1,500 samples per case). Errors are relative, on currents above 10<sup>&minus;14</sup>&nbsp;A; R&sup2; is computed on asinh(I/1&nbsp;fA), which weights every decade equally. Bold = selected.", best=lambda i, r: bool(best.iloc[i]), cls="small")}
 {fig(fig_model_comparison(mc), "Validation median error by model family (log scale). The dotted line is 1&nbsp;%.")}
-<p><b>Choice.</b> The MLP wins every case, usually by 5&ndash;20&times; in median error and more in the 95th percentile. Log-conductance is a
-smooth function of the inputs, a sum of exponents with gentle non-linearities, which a tanh network represents with few parameters. Trees
-fit it in piecewise-constant steps, which gives the heavy p95 tails in Table 2. A degree-3/4 polynomial is accurate where it is flexible
-enough (NMOS OFF I<sub>d</sub>) but fails on mechanisms with sharper bias dependence, for example the junction/GIDL current in I<sub>b</sub>.
-Of the two MLP sizes, the 64-unit network was selected for every case.</p>
+<p><b>Choice.</b> The MLP has the lowest selection score in all four cases. Over the 16 combinations of case and
+current, the median error of the best other family is {cmp["med"].min():.1f} to {cmp["med"].max():.1f} times the median
+error of the MLP, and its 95th-percentile error is {cmp["p95"].min():.1f} to {cmp["p95"].max():.1f} times that of the
+MLP (Table 2). {cmp_text} The polynomial model has a median I<sub>b</sub> error of {p(poly_ib.min())} to
+{p(poly_ib.max())}&nbsp;% in all four cases. We assume that the smooth dependence of log G on the inputs suits a tanh
+network, and that the piecewise-constant fits of the tree models cause their larger 95th-percentile errors
+(assumed). The selected MLP has 64 units per hidden layer in {n64} of the four cases.</p>
 <h3>3.3 Test-set performance of the chosen models</h3>
-{table(cht, caption="Table 3. Chosen models on the held-out test set (1,500 uniform samples per case).")}
+{table(cht, caption="Table 3. Chosen models on the held-out test set (1,500 uniform samples per case). Errors are relative.")}
 {table(dep, caption="Table 4. The same models on the deployment-check test set (1,000 samples per case at the gate widths and rail voltages).")}
-<p>On the test set the median error is below 1&nbsp;% for every current and case. On the deployment-check set the
-leakage-carrying currents (I<sub>d</sub>, I<sub>s</sub>) stay below 1&nbsp;% in the median. The larger OFF-state I<sub>b</sub> errors there are on
-body currents of about 10<sup>&minus;14</sup>&nbsp;A, six to seven decades below the channel current, so they do not affect gate leakage. The PMOS-OFF I<sub>g</sub> and I<sub>s</sub> rows evaluate fewer
-samples (see the <code>eval_frac</code> columns of <code>chosen_models_test.csv</code>), because those currents are often below the
-10<sup>&minus;14</sup>&nbsp;A floor.</p>
+<p>On the uniform test set, the median error is at most {p(test_med_max)}&nbsp;% for every current and case. On the
+deployment-check test set, the median error of I<sub>d</sub> and I<sub>s</sub> is at most {p(dep_idis_max)}&nbsp;%
+({CASE[dep_idis_arg]}), and it is below 1&nbsp;% in {n_dep_below1} of the four cases. The median I<sub>b</sub> error in
+the OFF cases of this set is {p(chi.loc['nmos_off','deploy_ib_med%'])}&nbsp;% for NMOS OFF and
+{p(chi.loc['pmos_off','deploy_ib_med%'])}&nbsp;% for PMOS OFF. The median |I<sub>b</sub>| of these cases is
+{sci(dep_med['nmos_off']['ib'])}&nbsp;A and {sci(dep_med['pmos_off']['ib'])}&nbsp;A, against a median |I<sub>d</sub>| of
+{sci(dep_med['nmos_off']['id'])}&nbsp;A and {sci(dep_med['pmos_off']['id'])}&nbsp;A (simulated). For PMOS OFF,
+I<sub>g</sub> is above the 10<sup>&minus;14</sup>&nbsp;A evaluation floor in {p(100*chi.loc['pmos_off','ig_eval_frac'],0)}&nbsp;%
+of the test samples and I<sub>s</sub> in {p(100*chi.loc['pmos_off','is_eval_frac'],0)}&nbsp;%, and the errors of these
+currents refer to those samples.</p>
 {fig(F / 'pred_vs_spice_nmos_on.png', 'Predicted vs SPICE, NMOS ON, test set (Id, Ig, Is, Ib).')}
 {fig(F / 'pred_vs_spice_nmos_off.png', 'Predicted vs SPICE, NMOS OFF, test set.')}
 {fig(F / 'pred_vs_spice_pmos_on.png', 'Predicted vs SPICE, PMOS ON, test set.')}
 {fig(F / 'pred_vs_spice_pmos_off.png', 'Predicted vs SPICE, PMOS OFF, test set. The spread in I<sub>g</sub> is at 10<sup>&minus;16</sup>&ndash;10<sup>&minus;15</sup> A, below the evaluation floor.')}
-<h3>3.4 Does the structure matter? Ablation and data size</h3>
-<p>The ablation trains the same MLP (same size, same rows, same ensemble) to predict each terminal current directly, on an asinh scale.
-It is {p(ab_ratio,1)}&times; worse in median error (median over the 16 currents). The learning curve retrains the chosen recipe on 500
-to {nmax} uniform samples (plus half as many rail samples). The median error reaches within 25&nbsp;% of the full-size model at
-{", ".join(f"{CASE[c]} n&nbsp;=&nbsp;{n}" for c, n in n_enough.items())}. This answers the brief's question of the smallest
-sufficient dataset: a few thousand SPICE samples per case.</p>
+<h3>3.4 Ablation and data size</h3>
+<p>In the ablation, we trained the same MLP (same size, same rows, same ensemble size) to predict each terminal
+current directly, on an asinh scale. Its median error is {p(ab_ratio,1)} times that of the bipole model (median over
+the 16 currents). In the learning curve, we retrained the chosen recipe on 500 to {nmax} uniform samples, each with
+half as many rail samples. The median error is within 25&nbsp;% plus 0.05 percentage points of the error of the
+full-size model from the following numbers of uniform training samples: {", ".join(f"{CASE[c]} {n}" for c, n in n_enough.items())}.
+We therefore take a few thousand ngspice samples per case as the dataset size needed for this accuracy.</p>
 {table(abt, caption="Table 5. Ablation: direct terminal-current MLP vs the bipole model (validation set).", cls="small")}
 {fig(fig_learning_curve(lc), "Learning curve: validation median (solid) and 95th-percentile (dashed) error vs the number of uniform training samples.")}
 {table(piv_t, caption="Table 6. Learning curve, validation median error (%).", cls="small")}
@@ -451,23 +555,26 @@ sufficient dataset: a few thousand SPICE samples per case.</p>
     best_case = gr.loc[gr.p95_err_pct.idxmin()]
     S.append(f"""
 <h2>4&nbsp; Gate results</h2>
-<p>Each of the 18 gate/input cases is simulated at the same 200 random corners. A corner is one draw of VDD, T and process: one draw for all
-NMOS and one for all PMOS. Following the brief, the ML leakage uses the SPICE-recorded internal and output voltages to set each transistor's
-terminal voltages, then sums V&middot;I over the predicted bipole currents. As an extension (&sect;7.1), the internal and output node voltages
-are also solved from the ML models alone. Both sets of node voltages are recorded in <code>results/gate_samples.csv</code>.</p>
+<p>We simulated each of the 18 gate and input cases at the same 200 random corners. A corner is one draw of VDD, T
+and the process parameters, with one draw shared by all NMOS and one by all PMOS. As the brief specifies, the main
+ML estimate takes the internal and output voltages recorded in ngspice, derives the terminal voltages of every
+transistor from them, and sums V&middot;I over the estimated bipole currents. In an extension (Section 7.1) we also
+solved the node voltages with the ML models alone. <code>results/gate_samples.csv</code> holds both sets of node
+voltages.</p>
 {table(grt, caption=f"Table 7. Gate results, 200 corners per case. Over all 3,600 simulations: mean accuracy {p(gate_acc)} %, median error {p(np.median(rel))} %, p95 {p(np.quantile(rel,.95))} %, max {p(rel.max())} %. ML-solved: {p(gate_acc_solved)} %, {p(np.median(rel_s))} %, {p(np.quantile(rel_s,.95))} %, {p(rel_s.max())} %.", cls="small")}
 {fig(F / 'gate_parity.png', 'Gate parity plot, all 3,600 simulations (log axes; dotted lines at &plusmn;1 % and &plusmn;5 %).', 62)}
 {fig(fig_gate_error_vs_corner(gs), 'Signed gate error vs temperature, VDD and PMOS vth0, in deciles of each variable (median and 5&ndash;95 % band).')}
-<p><b>Most and least accurate.</b> Mean accuracy per gate:
-{", ".join(f"{g} {p(v)} %" for g, v in by_gate.items())}. The most accurate case is
-{best_case.gate} {best_case.inputs} (p95 {p(best_case.p95_err_pct)} %). Its leakage is set by a two-transistor OFF stack, whose current is
-small and dominated by a single, well-sampled mechanism. The least accurate is {worst_case.gate} {worst_case.inputs}
-(p95 {p(worst_case.p95_err_pct)} %). The cases with the largest tails (INV&nbsp;1, AND2&nbsp;00/01/10, whose output inverter sees a 1, and
-NOR2&nbsp;01, OR2&nbsp;00) all leak through a single OFF PMOS with V<sub>sd</sub> &asymp; VDD. That makes the PMOS-OFF channel model the
-accuracy bottleneck at gate level, consistent with it having the highest test p95 in Table 3. The stack effect is visible in the SPICE
-medians: NAND2&nbsp;00 and NOR2&nbsp;11 leak about 200&times; less than an inverter, because the internal node rises (falls) and reverse-biases
-the upper OFF device. The models reproduce this without being told: the ML-solved internal node voltages agree with SPICE to within
-{p(node_dv.max())} mV (median {p(np.median(node_dv),3)} mV).</p>
+<p><b>Accuracy by gate and input.</b> The mean accuracy per gate is
+{", ".join(f"{g} {p(v)}&nbsp;%" for g, v in by_gate.items())}. The four cases with the largest 95th-percentile error are
+{", ".join(f"{r.gate} {r.inputs} ({p(r.p95_err_pct)}&nbsp;%)" for r in top4.itertuples())}. The smallest is
+{best_case.gate} {best_case.inputs} ({p(best_case.p95_err_pct)}&nbsp;%). The 95th-percentile errors of all 18 cases lie
+between {p(p95_lo)} and {p(p95_hi)}&nbsp;%.</p>
+<p>The simulated medians show the stack effect. NAND2 00 leaks {p(sm['INV','0']/sm['NAND2','00'],0)} times less than
+INV with input 0 and {p(sm['INV','1']/sm['NAND2','00'],0)} times less than INV with input 1. NOR2 11 leaks
+{p(sm['INV','0']/sm['NOR2','11'],0)} and {p(sm['INV','1']/sm['NOR2','11'],0)} times less. In both gates two OFF
+transistors are in series, and we assume that the internal node then moves to a voltage that reverse-biases the
+upper OFF device (assumed). The ML-solved internal node voltages differ from ngspice by at most {p(node_dv.max())} mV
+(median {p(np.median(node_dv),3)} mV), so the models reproduce this shift of the node voltage.</p>
 """)
 
     # ---------------------------------------------------------------- 5 circuit
@@ -481,36 +588,40 @@ the upper OFF device. The models reproduce this without being told: the ML-solve
     best_vec = cres.loc[cres.med_err_pct.idxmin()]
     S.append(f"""
 <h2>5&nbsp; Test-circuit results: 3-bit CLA</h2>
-<p>The adder is built only from library gates. The propagate signals p<sub>i</sub> = a<sub>i</sub>&oplus;b<sub>i</sub> use 4-NAND2 XORs and the
-generate signals g<sub>i</sub> = a<sub>i</sub>b<sub>i</sub> use AND2. Each carry is computed directly from g, p and c<sub>0</sub>
-(c<sub>3</sub> = g<sub>2</sub>+p<sub>2</sub>g<sub>1</sub>+p<sub>2</sub>p<sub>1</sub>g<sub>0</sub>+p<sub>2</sub>p<sub>1</sub>p<sub>0</sub>c<sub>0</sub>
-from AND2/OR2 trees), and s<sub>i</sub> = p<sub>i</sub>&oplus;c<sub>i</sub>. That gives 42 gates and 204 transistors; a unit test checks that
-it adds correctly for all 128 inputs. SPICE simulates the full netlist for all 128 vectors at the same 200 corners (25,600 operating points,
-{spice_cla_s:.0f}&nbsp;s on {envd.get('cpu cores used','?')} cores). For the hierarchical ML prediction (the brief's method), logic values are
-propagated, each gate's Part-B ML leakage is looked up for its input combination and corner, and the 42 values are summed.</p>
-{table(cst, caption="Table 8. CLA metrics over 128 vectors &times; 200 corners = 25,600 points. Rows 2&ndash;4 split the error into its causes; row 5 is our extension (&sect;7.2).", cls="small")}
+<p>We built the adder only from library gates. The propagate signals p<sub>i</sub> = a<sub>i</sub>&oplus;b<sub>i</sub> use
+XOR gates made of four NAND2 each, and the generate signals g<sub>i</sub> = a<sub>i</sub>b<sub>i</sub> use AND2. Each
+carry is computed directly from g, p and c<sub>0</sub>, for example
+c<sub>3</sub> = g<sub>2</sub>+p<sub>2</sub>g<sub>1</sub>+p<sub>2</sub>p<sub>1</sub>g<sub>0</sub>+p<sub>2</sub>p<sub>1</sub>p<sub>0</sub>c<sub>0</sub>
+from AND2 and OR2 trees, and s<sub>i</sub> = p<sub>i</sub>&oplus;c<sub>i</sub>. The adder has 42 gates and 204 transistors,
+and a unit test checks that it adds correctly for all 128 inputs. We simulated the full netlist in ngspice for all
+128 vectors at the same 200 corners (25,600 operating points, {spice_cla_s:.0f}&nbsp;s wall-clock time on {cores}
+cores, measured). For the hierarchical estimate that the brief specifies, we propagated the logic values, looked up
+the Part B ML leakage of each gate for its input combination and corner, and summed the 42 values.</p>
+{table(cst, caption="Table 8. CLA metrics over 128 vectors &times; 200 corners = 25,600 points. Rows 2&ndash;4 split the error into its causes; row 5 is our extension (Section&nbsp;7.2).", cls="small")}
 <div class="grid2">
 {fig(F / 'circuit_parity.png', 'CLA parity plot (log axes): hierarchical ML (the brief) and levels-aware ML vs the SPICE circuit.')}
 {fig(fig_cla_vs_temp(cs), 'Median signed CLA error vs temperature for each method.')}
 </div>
-<p><b>Compared with the gates.</b> The hierarchical estimate reaches {p(acc['ml_gate_sum'])} % mean accuracy (median error
-{p(hml.med_err_pct)} %, bias {p(hml.bias_pct)} %), clearly below the gate level, as the brief anticipates. The extra reference points show
-where the error comes from:</p>
-<ul>
-<li><b>ML error alone</b> (ML gate sum vs SPICE gate sum): median {p(mlerr.med_err_pct)} %, mean accuracy {p(acc_mlonly)} %. This is the gate-level
-accuracy again; gate errors partly cancel in the sum.</li>
-<li><b>Hierarchy error alone</b> (SPICE gate sum vs SPICE circuit): bias {p(hier_err.bias_pct)} %, p95 {p(hier_err.p95_err_pct)} %. The isolated-gate
-assumption is wrong in a systematic way, independent of the ML.</li>
-<li><b>Flat ML</b> (all 204 transistors at the circuit's own SPICE voltages): median {p(flat.med_err_pct)} %. The transistor models are just as good
-inside the large circuit.</li>
-</ul>
-<p>The hierarchy error grows with temperature, from about {p(np.median(100*(cs.spice_gate_sum/cs.spice_leak-1)[cs.temp<0]),1)} % below 0&nbsp;&deg;C
-to {p(np.median(100*(cs.spice_gate_sum/cs.spice_leak-1)[cs.temp>80]),1)} % above 80&nbsp;&deg;C. In a real chain a logic 0 sits tens of mV above
-ground (Figure&nbsp;{N_FIG[0]+1}) and a logic 1 below VDD, and the shift grows with leakage, so with temperature. The next gate's OFF transistor sees
-that offset on its gate, and sub-threshold current is exponential in it, so the real circuit leaks more than the ideal-input sum. Loading
-(tunnelling current drawn by fan-out pins) is a much smaller effect: the levels-aware hierarchy below ignores it and still removes the bias.
-Per vector, the median error ranges from {p(best_vec.med_err_pct)} % (inputs {best_vec.inputs}) to {p(worst_vec.med_err_pct)} %
-(inputs {worst_vec.inputs}); <code>results/circuit_results.csv</code> lists all 128.</p>
+<p><b>Comparison with the gates.</b> The hierarchical estimate has a mean accuracy of
+{p(acc['ml_gate_sum'])}&nbsp;% (median error {p(hml.med_err_pct)}&nbsp;%, bias {p(hml.bias_pct)}&nbsp;%), which is below the
+gate level. Table 8 separates the error into its causes. The ML error alone (ML gate sum against ngspice gate sum)
+has a median of {p(mlerr.med_err_pct)}&nbsp;% and a mean accuracy of {p(acc_mlonly)}&nbsp;%. The hierarchy error alone
+(ngspice gate sum against the ngspice circuit) has a bias of {p(hier_err.bias_pct)}&nbsp;% and a 95th percentile of
+{p(hier_err.p95_err_pct)}&nbsp;%, and it does not depend on the ML models. Flat ML, which applies the models to all
+204 transistors at the voltages of the ngspice circuit, has a median error of {p(flat.med_err_pct)}&nbsp;%, against
+{p(np.median(rel))}&nbsp;% for the gates, so the transistor models are as accurate inside the large circuit as in the
+gates.</p>
+<p>The bias of the hierarchy changes with temperature, from
+{p(np.median(100*(cs.spice_gate_sum/cs.spice_leak-1)[cs.temp<0]),1)}&nbsp;% below 0&nbsp;&deg;C to
+{p(np.median(100*(cs.spice_gate_sum/cs.spice_leak-1)[cs.temp>80]),1)}&nbsp;% above 80&nbsp;&deg;C (median of the ngspice
+gate sum against the ngspice circuit). The cause is the level of the logic signals between gates. In ngspice, a
+logic 0 at a gate output sits a few to tens of mV above ground and a logic 1 sits below VDD (Figure&nbsp;{N_FIG[0]+1}),
+and the offset grows with temperature. The next gate's OFF transistor has this offset on its gate, and its
+sub-threshold current depends exponentially on the gate voltage (assumed physical model). The circuit therefore
+leaks more than the sum of the ideal-input gate leakages. The levels-aware hierarchy of Section 7.2 removes the bias
+without a model of loading between gates. Per vector, the median error ranges from {p(best_vec.med_err_pct)}&nbsp;%
+(inputs {best_vec.inputs}) to {p(worst_vec.med_err_pct)}&nbsp;% (inputs {worst_vec.inputs}); <code>results/circuit_results.csv</code>
+lists all 128.</p>
 {fig(fig_level_shift(gs), 'How far isolated-gate outputs sit from the rails in SPICE (median per temperature decile, log scale).', 70)}
 """)
 
@@ -526,23 +637,30 @@ Per vector, the median error ranges from {p(best_vec.med_err_pct)} % (inputs {be
     lv = gs[gs.vdd < 0.95 * config.VDD_NOM].ae
     S.append(f"""
 <h2>6&nbsp; Error analysis</h2>
-<p><b>Where.</b> At gate level the error depends mainly on temperature and supply. Below 0&nbsp;&deg;C the median |error| is
-{p(np.median(cold))} % (p95 {p(np.quantile(cold,.95))} %), against {p(np.median(warm))} % (p95 {p(np.quantile(warm,.95))} %) above 40&nbsp;&deg;C.
-Above 1.05&nbsp;V the p95 is {p(np.quantile(hv,.95))} %, against {p(np.quantile(lv,.95))} % below 0.95&nbsp;V. The worst points all come from a few
-cold, high-VDD corners (Table&nbsp;9) and from the cases that leak through one OFF PMOS (&sect;4). Process parameters have weak correlation with the
-error (|r| &lt; 0.1 for every parameter), so the models capture the process dependence well.</p>
+<p><b>Where.</b> At gate level, the median |error| is {p(np.median(cold))}&nbsp;% below 0&nbsp;&deg;C (95th percentile
+{p(np.quantile(cold,.95))}&nbsp;%) and {p(np.median(warm))}&nbsp;% above 40&nbsp;&deg;C ({p(np.quantile(warm,.95))}&nbsp;%).
+Above 1.05&nbsp;V the 95th percentile is {p(np.quantile(hv,.95))}&nbsp;%, and below 0.95&nbsp;V it is
+{p(np.quantile(lv,.95))}&nbsp;%. Over the 3,600 gate simulations, |error| has a correlation of {p(r_t)} with T and
+{p(r_v)} with VDD. For the ten process parameters, the largest correlation magnitude is {p(r_proc)} with the signed
+error and {p(r_proc_abs)} with |error|. The eight largest errors (Table 9) occur at corners with T from
+{worst.temp.min():.0f} to {worst.temp.max():.0f}&nbsp;&deg;C and VDD from {worst.vdd.min():.3f} to {worst.vdd.max():.3f}&nbsp;V.</p>
 {table(worst_t, caption="Table 9. The eight largest gate errors.", cls="small")}
-<p><b>Why.</b> (1) Cold OFF currents are the smallest in the dataset, and log G changes fastest with V<sub>th</sub>/V<sub>T</sub> there. The same
-error in log G is a larger relative current error, and cold, high-VDD corners are corners of the 12-dimensional input box where uniform data is
-thinnest. (2) At high VDD, drain-induced barrier lowering and GIDL make the OFF current depend more steeply on V<sub>ds</sub> exactly where the
-gate operates (V<sub>ds</sub> = VDD). (3) The PMOS-OFF channel is the weakest of the four models, because its leakage depends on several
-competing mechanisms of similar size.</p>
-<p><b>A SPICE artefact found along the way.</b> Before the fix, the worst "error" was +126 % on INV A=1 at corner 198 (112&nbsp;&deg;C, 1.088&nbsp;V).
-The ML was right: ngspice had converged to a spurious operating point. Sweeping V(out) with a forcing source shows a single true KCL root at
-42&nbsp;mV (3.58&nbsp;&micro;A). The default Newton start gets stuck at a narrow kink of the model near 22&nbsp;mV. Starting every gate and circuit
-simulation from a logic-level <code>.nodeset</code> removes it. Only this one of the 3,600 gate points moved by more than 0.1 %, and no CLA point did.</p>
-<p><b>Circuit level.</b> The CLA error of the brief's method is dominated by the ideal-level assumption (&sect;5), with a {p(hier_err.bias_pct)} % bias
-that grows with temperature. With the levels corrected, the remaining CLA error ({p(lev.med_err_pct)} % median) equals the gate-level ML error.</p>
+<p><b>Why.</b> We explain the pattern with three causes (assumed). (1) The OFF currents at low temperature are the
+smallest in the dataset, and log G changes fastest with V<sub>th</sub>/V<sub>T</sub> there, so a given error in log G
+gives a larger relative error in the current. (2) At high VDD, drain-induced barrier lowering and GIDL make the OFF
+current depend more steeply on V<sub>ds</sub> at the point where the gate operates (V<sub>ds</sub> = VDD). (3) Cold and
+high-VDD corners lie in the part of the 12-dimensional input box where the uniform training data is thinnest. At
+transistor level, the highest 95th-percentile test error is {p(wc[2])}&nbsp;% for {CASE[wc[0]]} I<sub>{wc[1][1]}</sub>
+(Table 3).</p>
+<p><b>A reference error.</b> For INV with A&nbsp;=&nbsp;1 at corner 198 (112&nbsp;&deg;C, 1.088&nbsp;V), ngspice with its default
+Newton start converged to a spurious operating point, which gave an error of +126&nbsp;% against the ML estimate. A
+sweep of V(out) with a forcing source (simulated) shows a single KCL root at 42&nbsp;mV (3.58&nbsp;&micro;A). The default
+start settles at a narrow kink of the model near 22&nbsp;mV (1.85&nbsp;&micro;A). We start every gate and circuit
+simulation from a logic-level <code>.nodeset</code>, which removes this effect. Of the 3,600 gate points, only this
+one changed by more than 0.1&nbsp;%, and no CLA point changed (development log, <code>CHANGES.md</code>).</p>
+<p><b>Circuit level.</b> The CLA error of the brief's method has a bias of {p(hier_err.bias_pct)}&nbsp;% that changes
+with temperature (Section 5). With the levels corrected (Section 7.2), the median CLA error is
+{p(lev.med_err_pct)}&nbsp;%, against a gate-level median of {p(np.median(rel))}&nbsp;%.</p>
 """)
 
     # ---------------------------------------------------------------- 7 extensions
@@ -555,31 +673,38 @@ that grows with temperature. With the levels corrected, the remaining CLA error 
     ext = [f"""
 <h2>7&nbsp; Extensions</h2>
 <h3>7.1 SPICE-free node voltages</h3>
-<p>The ML models can predict the operating point as well as the leakage. At DC, the ML-predicted terminal currents into every internal node sum
-to zero. <code>leakml/solve.py</code> solves this KCL system for all unknown nodes at once: damped Newton, finite-difference Jacobian, each step
-limited to 50&nbsp;mV as SPICE does. It is vectorised over corners and iterates only on rows that have not converged. The initial guess puts logic
-nodes at their rails and stack nodes at the rail of their ON neighbour. Every gate case converges, with the KCL residual below 10<sup>&minus;12</sup>&nbsp;A.
-The solved node voltages are within {p(node_dv.max())} mV of SPICE, and the leakage computed from them is as accurate as with SPICE voltages
-({p(gate_acc_solved)} % vs {p(gate_acc)} %).</p>
+<p>At DC, the ML terminal currents into every internal node sum to zero. <code>leakml/solve.py</code> solves this KCL
+system for all unknown nodes at once with a damped Newton method: a finite-difference Jacobian, and each step
+limited to 50&nbsp;mV as in SPICE. It runs on all corners together and iterates only on the rows that have not
+converged. The initial guess puts logic nodes at their rails and stack nodes at the rail of their ON neighbour. The
+solved node voltages differ from ngspice by at most {p(node_dv.max())} mV, and the leakage computed from them has a
+mean accuracy of {p(gate_acc_solved)}&nbsp;% ({p(gate_acc)}&nbsp;% with the ngspice voltages).</p>
 <h3>7.2 Levels-aware hierarchy</h3>
-<p>The same solver fixes the CLA hierarchy. Gates are visited in topological order, and each one is solved with its inputs set to the
-<i>ML-predicted output voltages</i> of its drivers instead of ideal 0/VDD. Rows that share a corner and input voltages are solved once. Over 42
-gates the solver needs at most {int(lstats.iterations.max())} iterations and leaves {int(lstats.unconverged.sum())} rows unconverged. The predicted
-gate-output voltages match the full SPICE circuit to {log_value('circuit_log.txt', r'median \|dV\| ([0-9.]+) mV')} mV in the median
-({log_value('circuit_log.txt', r'max ([0-9.]+) mV')} mV max). The CLA leakage improves to <b>{p(acc['ml_levels'])} % mean accuracy</b>, with median
-error {p(lev.med_err_pct)} %, p95 {p(lev.p95_err_pct)} %, max {p(lev.max_err_pct)} % and bias {lev.bias_pct:+.2f} %. That beats even the flat ML on SPICE
-voltages ({p(acc['ml_flat'])} %) and uses no SPICE input at all: the full chain from the model card to circuit leakage runs on four ML models.</p>
+<p>The same solver supplies the gate-input levels of the CLA hierarchy. We visit the gates in topological order and
+solve each one with its inputs set to the ML-estimated output voltages of its drivers instead of an ideal 0 or VDD.
+Rows with the same corner and input voltages are solved once. Over the 42 gates the solver needs at most
+{int(lstats.iterations.max())} iterations, and {int(lstats.unconverged.sum())} rows remain unconverged (largest
+residual {sci(lstats.max_residual.max())}&nbsp;A, from the solver statistics). The estimated gate-output voltages differ
+from the ngspice circuit by {log_value('circuit_log.txt', r'median \|dV\| ([0-9.]+) mV')}&nbsp;mV in the median and
+{log_value('circuit_log.txt', r'max ([0-9.]+) mV')}&nbsp;mV at most. The estimated CLA leakage has a <b>mean accuracy of
+{p(acc['ml_levels'])}&nbsp;%</b>, with median error {p(lev.med_err_pct)}&nbsp;%, 95th percentile {p(lev.p95_err_pct)}&nbsp;%,
+maximum {p(lev.max_err_pct)}&nbsp;% and bias {lev.bias_pct:+.2f}&nbsp;%. Flat ML on the ngspice voltages has a mean
+accuracy of {p(acc['ml_flat'])}&nbsp;%. The levels-aware estimate uses no ngspice voltage as input, so the whole chain
+from the model card to the circuit leakage runs on the four ML models.</p>
 """]
     if mlv is not None:
         m = mlv.set_index("method")
         ext.append(f"""
 <h3>7.3 Minimum-leakage standby vector</h3>
-<p>In standby, a block can be parked at the input vector that leaks least. The CLA's 128 vectors differ by
-{cs.groupby('vector').spice_leak.mean().max() / cs.groupby('vector').spice_leak.mean().min():.2f}&times; in mean leakage. Ranked by ML, the vectors
-follow SPICE with Spearman &rho; = {m.loc['ml_levels','spearman']:.3f} (levels-aware) and {m.loc['ml_gate_sum','spearman']:.3f}
-(ideal-level hierarchy). Both pick the same minimum-leakage vector as SPICE ({m.loc['ml_levels','ml_mlv']}). Choosing the best vector separately in
-each corner, the levels-aware ML finds the exact SPICE optimum in {100*m.loc['ml_levels','corners_exact']:.0f} % of corners and is never more than
-{p(m.loc['ml_levels','corner_regret_max_pct'])} % above it.</p>
+<p>In standby, a block can be parked at the input vector that leaks least. The mean leakage of the 128 CLA vectors
+spans a factor of {cs.groupby('vector').spice_leak.mean().max() / cs.groupby('vector').spice_leak.mean().min():.2f}
+(simulated). The Spearman correlation between the ML ranking of the vectors and the ngspice ranking is
+{m.loc['ml_levels','spearman']:.3f} for the levels-aware estimate and {m.loc['ml_gate_sum','spearman']:.3f} for the
+ideal-level hierarchy. The estimated minimum-leakage vector is {m.loc['ml_gate_sum','ml_mlv']} for the ideal-level
+hierarchy and {m.loc['ml_levels','ml_mlv']} for the levels-aware estimate, and ngspice gives
+{m.loc['ml_levels','spice_mlv']}. When the best vector is chosen separately in each corner, the levels-aware estimate
+finds the ngspice optimum in {100*m.loc['ml_levels','corners_exact']:.0f}&nbsp;% of the corners, and its leakage is at most
+{p(m.loc['ml_levels','corner_regret_max_pct'])}&nbsp;% above the optimum.</p>
 {fig(F / 'extras_mlv.png', 'Mean CLA leakage of the 128 input vectors, sorted by SPICE.')}
 """)
     if mech is not None:
@@ -587,18 +712,22 @@ each corner, the levels-aware ML finds the exact SPICE optimum in {100*m.loc['ml
         tlo, thi = mech[mech.temp == mech.temp.min()], mech[mech.temp == mech.temp.max()]
         ext.append(f"""
 <h3>7.4 Leakage by mechanism</h3>
-<p>SPICE reports only total currents, but the bipole models split leakage into physical mechanisms. Averaged over the 18 gate cases at nominal
-process and VDD:</p>
+<p>ngspice reports only total currents. The bipole models split the leakage into mechanisms. The following
+shares are averages over the 18 gate cases at nominal process and VDD (estimated):</p>
 <ul>
-<li>Channel (sub-threshold) leakage is {p(100*tlo.channel_frac.mean(),1)} % at &minus;40&nbsp;&deg;C, {p(100*t25.channel_frac.mean(),1)} % at
-{t25.temp.iloc[0]:.0f}&nbsp;&deg;C and {p(100*thi.channel_frac.mean(),1)} % at 125&nbsp;&deg;C.</li>
-<li>Gate tunnelling makes up the rest: {p(100*tlo.tunnelling_frac.mean(),1)} % when cold, falling to {p(100*thi.tunnelling_frac.mean(),1)} % when hot.
-It is almost temperature-independent while sub-threshold current grows exponentially.</li>
-<li>Junction leakage and GIDL are below {p(100*mech.junction_frac.max(),3)} % everywhere in this card.</li>
+<li>Channel (sub-threshold) leakage is {p(100*tlo.channel_frac.mean(),1)}&nbsp;% at &minus;40&nbsp;&deg;C,
+{p(100*t25.channel_frac.mean(),1)}&nbsp;% at {t25.temp.iloc[0]:.0f}&nbsp;&deg;C and
+{p(100*thi.channel_frac.mean(),1)}&nbsp;% at 125&nbsp;&deg;C.</li>
+<li>Gate tunnelling is the remainder: {p(100*tlo.tunnelling_frac.mean(),1)}&nbsp;% at &minus;40&nbsp;&deg;C and
+{p(100*thi.tunnelling_frac.mean(),1)}&nbsp;% at 125&nbsp;&deg;C. Between these temperatures the mean tunnelling current
+changes by a factor of {thi.tunnelling.mean()/tlo.tunnelling.mean():.2f} and the mean channel current by a factor of
+{thi.channel.mean()/tlo.channel.mean():.0f}.</li>
+<li>Junction leakage and GIDL are below {p(100*mech.junction_frac.max(),3)}&nbsp;% in every case of this model card.</li>
 </ul>
-<p>Gate tunnelling matters most in the stacked cases, where the stack has suppressed sub-threshold leakage: it is
-{p(100*t25[(t25.gate=='NAND2')&(t25.vector=='00')].tunnelling_frac.iloc[0],0)} % of NAND2&nbsp;00 and
-{p(100*t25[(t25.gate=='NOR2')&(t25.vector=='11')].tunnelling_frac.iloc[0],0)} % of NOR2&nbsp;11 near room temperature.</p>
+<p>In NAND2 00 and NOR2 11 the stack reduces the channel current, and tunnelling has a share of
+{p(100*t25[(t25.gate=='NAND2')&(t25.vector=='00')].tunnelling_frac.iloc[0],0)}&nbsp;% and
+{p(100*t25[(t25.gate=='NOR2')&(t25.vector=='11')].tunnelling_frac.iloc[0],0)}&nbsp;% at
+{t25.temp.iloc[0]:.0f}&nbsp;&deg;C.</p>
 {fig(F / 'extras_mechanisms.png', 'Left: mechanism currents vs temperature for three gate cases. Right: share of each mechanism per gate case near room temperature.')}
 """)
     if sens is not None:
@@ -607,12 +736,16 @@ It is almost temperature-independent while sub-threshold current grows exponenti
         top = s.iloc[np.argsort(-np.abs(np.log(s.span.to_numpy())))].head(4)
         ext.append(f"""
 <h3>7.5 Sensitivity</h3>
-<p>Each PVT parameter is moved one at a time (process and VDD &plusmn;10 %, T to &minus;40 / 125&nbsp;&deg;C) and the levels-aware CLA leakage is
-averaged over all 128 vectors. The largest effects are {", ".join(f"{r.case} ({r.ratio_to_nominal:.2f}&times;)" for r in top.itertuples())}.
-Supply voltage has the largest effect, through drain-induced barrier lowering: a higher V<sub>ds</sub> lowers the
-OFF device's threshold. Next come PMOS vth0 and temperature, as the sub-threshold law exp(&minus;V<sub>th</sub>/nV<sub>T</sub>) predicts. PMOS
-parameters matter more than NMOS ones because the PMOS devices are twice as wide and carry most of the CLA leakage. Oxide thickness, mobility
-and junction depth change the leakage by less than 10&nbsp;%.</p>
+<p>We moved each PVT parameter by itself (process parameters and VDD by &plusmn;10&nbsp;%, T to &minus;40 and
+125&nbsp;&deg;C) and averaged the estimated levels-aware CLA leakage over all 128 vectors. The four largest effects are
+{", ".join(f"{r.case} ({r.ratio_to_nominal:.2f}&times;)" for r in top.itertuples())}. VDD has the largest effect: +10&nbsp;%
+gives {sv['VDD +10%']:.2f}&times; and &minus;10&nbsp;% gives {sv['VDD -10%']:.2f}&times;. We assume that the cause is
+drain-induced barrier lowering, which lowers the threshold of the OFF devices at higher V<sub>ds</sub> (assumed). PMOS
+vth0 and temperature follow, in line with the exp(&minus;V<sub>th</sub>/nV<sub>T</sub>) dependence of the sub-threshold
+current (assumed). PMOS parameters have larger effects than NMOS parameters: &minus;10&nbsp;% vth0 gives
+{sv['pmos vth0 -10%']:.2f}&times; for PMOS and {sv['nmos vth0 -10%']:.2f}&times; for NMOS. We assume that this is because the
+PMOS devices are twice as wide and carry more of the CLA leakage (assumed). Oxide thickness, mobility and junction
+depth each change the leakage by at most {p(sv_small,1)}&nbsp;%.</p>
 {fig(F / 'extras_sensitivity.png', 'One-at-a-time sensitivity of the CLA leakage (log scale).', 75)}
 """)
     if mcs is not None:
@@ -622,9 +755,10 @@ and junction depth change the leakage by less than 10&nbsp;%.</p>
             for r in mcs.itertuples())
         ext.append(f"""
 <h3>7.6 Monte-Carlo leakage distribution</h3>
-<p>Once trained, the models make large statistical studies cheap. The levels-aware CLA leakage is evaluated at {int(mcs.n.iloc[0]):,} new random corners
-for the minimum- and maximum-leakage vectors. {rows} The distribution is strongly right-skewed: worst-case design must budget for
-several times the median leakage.</p>
+<p>Evaluating the trained models is cheap enough for large statistical studies. We estimated the levels-aware CLA
+leakage at {int(mcs.n.iloc[0]):,} new random corners for the minimum- and maximum-leakage vectors. {rows} The
+distribution is right-skewed: the 99th percentile is {mcs.p99_over_median.min():.2f} to
+{mcs.p99_over_median.max():.2f} times the median.</p>
 {fig(F / 'extras_montecarlo.png', 'CLA leakage over new random corners (ML) vs the 200 SPICE corners.')}
 """)
     if unc is not None:
@@ -634,10 +768,11 @@ several times the median leakage.</p>
         lo_e, hi_e = unc.abs_err_pct[q == 0].median(), unc.abs_err_pct[q == 4].median()
         ext.append(f"""
 <h3>7.7 Uncertainty from the ensemble</h3>
-<p>Each of the five ensemble members gives its own gate leakage, and their spread is a free error bar. The spread correlates only weakly with the real
-error (Spearman &rho; = {rho:.2f}). The 20 % of points with the smallest spread have median error {p(lo_e)} %, and the 20 % with the largest have
-{p(hi_e)} %. The members disagree where data is thin, but most of the remaining error is shared by all members, a systematic bias of the training
-distribution. An ensemble cannot detect such a bias; only more data where the gates operate can remove it.</p>
+<p>Each of the five ensemble members gives its own gate leakage, and the spread between the members can serve as an
+error bar. The Spearman correlation between the spread and the actual |error| is {rho:.2f}. The 20&nbsp;% of the
+points with the smallest spread have a median |error| of {p(lo_e)}&nbsp;%, and the 20&nbsp;% with the largest spread have
+{p(hi_e)}&nbsp;%. We assume that the part of the error shared by all members comes from the training distribution, and
+the spread cannot show this part (assumed).</p>
 {fig(F / 'extras_uncertainty.png', 'Ensemble spread vs actual error, all 3,600 gate simulations.', 60)}
 """)
     if cost is not None:
@@ -646,11 +781,13 @@ distribution. An ensemble cannot detect such a bias; only more data where the ga
         flat_ms = c.ms_per_cpu_eval.iloc[1]
         ext.append(f"""
 <h3>7.8 Cost</h3>
-<p>SPICE needs {p(spice_ms)} ms of CPU time per CLA operating point. ML inference on the same 204 transistors, given the node voltages, needs
-{p(flat_ms,3)} ms, {spice_ms/flat_ms:.0f}&times; less. The brief's hierarchical lookup costs {hier_s:.1f}&nbsp;s for all 25,600 points once the gate tables
-exist. The SPICE-free levels-aware solve of all 25,600 points takes {lev_s:.0f}&nbsp;s on one core, about
-{c.cpu_seconds.iloc[0]/lev_s:.0f}&times; less CPU time than SPICE. Most of that time goes into the finite-difference Jacobian, which needs many model
-calls per Newton step; an analytic Jacobian of the MLPs would remove most of it.</p>
+<p>ngspice needs {p(spice_ms)}&nbsp;ms of CPU time per CLA operating point (measured on {platform}). The ML models
+need {p(flat_ms,3)}&nbsp;ms per point on the same 204 transistors when the node voltages are given, which is
+{spice_ms/flat_ms:.0f} times less CPU time. The lookup of the brief's hierarchy takes {hier_s:.1f}&nbsp;s for all 25,600
+points once the gate tables exist. The levels-aware solve of all 25,600 points takes {lev_s:.0f}&nbsp;s on one core,
+which is {c.cpu_seconds.iloc[0]/lev_s:.1f} times less CPU time than ngspice. In wall-clock time, ngspice took
+{spice_cla_s:.0f}&nbsp;s on {cores} cores. Training the {n_sub} sub-models took {train_s}&nbsp;s of wall-clock time
+(measured; the sub-models were trained in parallel).</p>
 """)
     if (R / "parity_summary.csv").exists():
         ps = pd.read_csv(R / "parity_summary.csv")
@@ -659,12 +796,13 @@ calls per Newton step; an analytic Jacobian of the MLPs would remove most of it.
                            "max err %": ps.max_err_pct.map(p), "mean acc %": ps.mean_acc.map(p)})
         lv, hr = ps.iloc[-1], ps.iloc[0]
         ext.append(f"""
-<h3>7.9 A second, unseen circuit: 8-bit parity checker</h3>
-<p>To check that nothing was tuned to the CLA, the brief's other test circuit was built from the same library: a balanced tree of seven 4-NAND2
-XORs (28 gates, 112 transistors). It was simulated in SPICE for all 256 vectors at the same 200 corners (51,200 points), with no retraining
-or other change. The brief's hierarchy reaches {p(hr.mean_acc)} % mean accuracy (bias {hr.bias_pct:+.2f} %). The levels-aware ML hierarchy
-reaches <b>{p(lv.mean_acc)} %</b> (median error {p(lv.med_err_pct)} %, p95 {p(lv.p95_err_pct)} %), confirming the CLA conclusions on a different
-circuit.</p>
+<h3>7.9 Second test circuit: 8-bit parity checker</h3>
+<p>We also built the brief's other test circuit from the same library: a balanced tree of seven XORs of four NAND2
+each (28 gates, 112 transistors). We simulated it in ngspice for all 256 vectors at the same 200 corners (51,200
+points) and applied the models without retraining or other changes. The brief's hierarchy has a mean accuracy of
+{p(hr.mean_acc)}&nbsp;% (bias {hr.bias_pct:+.2f}&nbsp;%), and the levels-aware hierarchy has {p(lv.mean_acc)}&nbsp;%
+(median error {p(lv.med_err_pct)}&nbsp;%, 95th percentile {p(lv.p95_err_pct)}&nbsp;%). The ranking of the two
+hierarchies is the same as for the CLA.</p>
 {table(pt, caption="Table 10. 8-bit parity checker, 256 vectors &times; 200 corners.", cls="small")}
 {fig(F / 'parity_parity.png', 'Parity checker: ML vs SPICE circuit leakage (log axes).', 55)}
 """)
@@ -674,25 +812,48 @@ circuit.</p>
     S.append(f"""
 <h2>8&nbsp; Limitations and improvements</h2>
 <ul>
-<li><b>Training distribution.</b> The 10,000 uniform samples rarely land where gates operate (terminals on the rails, cold and high-VDD
-corners). The rail supplement fixed most of this. The remaining tail is in cold, high-VDD, single-OFF-PMOS conditions. Adaptive sampling,
-adding SPICE points where the ensemble disagrees most, would target it directly.</li>
-<li><b>Ideal-level hierarchy.</b> As specified in the brief, the hierarchy is biased by {p(hier_err.bias_pct)} % on this circuit whatever the
-ML: even exact SPICE gate leakages give only {p(mean_acc(cs.spice_leak, cs.spice_gate_sum))} % mean accuracy. The levels-aware hierarchy (&sect;7.2) removes this limit. Loading between gates is still ignored, which is acceptable here
-because gate tunnelling is a small share of leakage at 16&nbsp;nm HP (&sect;7.4). It would matter more for thin-oxide LP cards.</li>
-<li><b>Solver speed.</b> The levels-aware solve uses finite-difference Jacobians. An analytic Jacobian, or a small learned gate-output model,
-would make it as fast as the lookup.</li>
-<li><b>Scope.</b> The models cover W = 1&ndash;8 L, &plusmn;10 % process and &minus;40 to 125&nbsp;&deg;C. Outside that box they extrapolate. One process draw is
-shared by all devices of a type (no within-die mismatch), as specified. Mismatch would need per-transistor draws, which the models already support.</li>
-<li><b>Simulator noise.</b> Data regenerated with ngspice 44.2 and 45.2 differs only below about 10<sup>&minus;12</sup>&nbsp;A. L-BFGS amplifies this into
-&plusmn;0.02 points of gate accuracy with 5 seeds (&plusmn;0.07 with 3). Training itself is bit-reproducible on identical data.</li>
+<li><b>Training distribution.</b> The 10,000 uniform samples rarely lie where gates operate (terminals on the rails,
+cold and high-VDD corners). The rail supplement and the deployment-check set reduce the error there, and the largest
+remaining gate errors occur at cold, high-VDD corners (Section 6). Adding ngspice samples where the ensemble members
+disagree most would target these corners. We have not tried this.</li>
+<li><b>Ideal-level hierarchy.</b> The hierarchy that the brief specifies has a bias of {p(hier_err.bias_pct)}&nbsp;% on
+this circuit for any ML model, because the exact ngspice gate leakages give a mean accuracy of
+{p(mean_acc(cs.spice_leak, cs.spice_gate_sum))}&nbsp;%. The levels-aware hierarchy (Section 7.2) removes most of this
+bias.</li>
+<li><b>Loading between gates.</b> The levels-aware hierarchy ignores the tunnelling current that a gate input draws
+from its driver. Averaged over the 18 gate cases, tunnelling is {p(tun_hot,1)}&nbsp;% of the leakage at 125&nbsp;&deg;C and
+{p(tun_cold,1)}&nbsp;% at &minus;40&nbsp;&deg;C (Section 7.4), and it is {p(tun_stack[0],0)}&nbsp;% in NAND2 00 and
+{p(tun_stack[1],0)}&nbsp;% in NOR2 11 near room temperature. We did not test the effect of loading on these stacked
+cases.</li>
+<li><b>Gate sizes and types.</b> Both test circuits use the same five library gates at W<sub>n</sub> = 2L and
+W<sub>p</sub> = 4L, and the deployment-check set uses these widths. We did not test other gate sizes between 1 and 8
+times L or other gate types, such as three-input stacks.</li>
+<li><b>Reference model.</b> The models learn the BSIM4 PTM model card as simulated by ngspice. Currents below
+10<sup>&minus;14</sup>&nbsp;A are simulator noise, and we excluded them from the percentage errors. The junction geometry
+(AS, AD, PS, PD) is a default constant. We did not compare the models with measurements.</li>
+<li><b>Accuracy metric.</b> The mean accuracy hides the tails, which the 95th percentile and the maximum describe.</li>
+<li><b>Solver speed.</b> The levels-aware solve uses finite-difference Jacobians, which need many model calls per
+Newton step. We assume that an analytic Jacobian or a small learned gate-output model would reduce the run time to
+that of the lookup (assumed); we have not tried either.</li>
+<li><b>Scope.</b> The models cover W = 1 to 8 L, &plusmn;10&nbsp;% process variation and &minus;40 to
+125&nbsp;&deg;C, and they extrapolate outside this range. As the brief specifies, one process draw is shared by all
+devices of a type, so within-die mismatch is not modelled. The models accept per-transistor process parameters, so
+mismatch needs only per-transistor draws (assumed). The simulations are DC operating points.</li>
+<li><b>Simulator noise.</b> According to the development log, data regenerated with ngspice 44.2 and 45.2 differ only
+below about 10<sup>&minus;12</sup>&nbsp;A. L-BFGS amplifies this to &plusmn;0.02 points in gate accuracy with five seeds
+(&plusmn;0.07 with three), and training is bit-reproducible on identical data. We did not test whether the
+{p(abs(acc['ml_levels'] - acc['ml_flat']))}-point difference between the levels-aware and flat-ML CLA accuracies
+(Section 7.2) exceeds this variation.</li>
 </ul>
 
 <h2>9&nbsp; Reproducibility and deliverables</h2>
-<p>All scripts run in order (<code>./run_all.sh --full</code>) from the model file with fixed seeds. The fast path (<code>./run_all.sh</code>) reuses
-the stored data, the saved models and the cached CLA SPICE reference, and reruns validation in minutes. <code>pytest</code> checks 26 invariants:
-KCL of the saved models, passivity of the bipoles, netlist/ML topology identity, truth tables, that the CLA adds correctly, the BSIM4 width clamp,
-solver convergence, and that the parity checker computes parity.</p>
+<p>All scripts run in order (<code>./run_all.sh --full</code>) from the model file with fixed seeds. The fast path
+(<code>./run_all.sh</code>) reuses the stored data, the saved models and the cached CLA ngspice reference, and reruns
+the validation in minutes. The test file <code>tests/test_pipeline.py</code> defines 14 test functions, and the
+development log reports 26 collected test cases. They check the KCL balance of the saved models, the passivity of
+the bipoles, the identity of the netlist and ML topologies, the truth tables, the addition of the CLA, the BSIM4
+width clamp, the convergence of the solver, and the parity function of the parity checker. The repository is at
+<a href="https://github.com/Shr1yaK/leaky-lima-leakage-estimation/">https://github.com/Shr1yaK/leaky-lima-leakage-estimation/</a>.</p>
 {table(pd.DataFrame([
     ["1", "Datasets (4 &times; 10,000 rows)", "data/{nmos,pmos}_{on,off}.csv"],
     ["2", "Example netlists", "netlists/single_*.cir, gate_*.cir, cla3.cir"],
