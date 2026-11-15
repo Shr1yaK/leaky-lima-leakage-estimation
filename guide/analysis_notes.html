@@ -1,0 +1,11 @@
+<h3>Reading the numbers</h3>
+<ul>
+  <li><b>Cold and high-VDD corners are the hardest; warm corners are the easiest.</b> Below 0 °C the median gate error is about 1.0 % (p95 3.2 %); above 40 °C it is about 0.6 % (p95 2.1 %). When it is cold, OFF currents are smallest and log I is most sensitive to every input, so a small error in log G becomes a larger relative error. At high VDD, DIBL is strongest, and VDD = 1.1 V is the edge of the training range. The worst gate samples all sit at two cold, high-VDD corners: −24 °C at 1.09 V and −1 °C at 1.08 V.</li>
+  <li><b>The cases with the largest tails leak through one OFF PMOS</b> with V<sub>sd</sub> ≈ VDD: INV 1, the AND2 cases whose output inverter sees a 1, NOR2 01 and OR2 00. The PMOS-OFF channel is the weakest of the four models. Every one of the 18 gate cases now has a bias within ±0.8 %.</li>
+  <li><b>No outliers.</b> The old +126 % point (INV 1, corner 198) turned out to be a spurious ngspice operating point, fixed with a <code>.nodeset</code> (Chapter 6). The worst of the 3,600 gate points is now under 6 %.</li>
+</ul>
+
+<h3>Why the adder is less accurate than the gates, and how we fixed it</h3>
+<p>The decomposition in Chapter 8 answers this directly. Adding up <em>SPICE</em> gate leakages already misses the real adder by −2.6 % (median), with no ML involved. The ML part adds only about 0.7 % median error on top. The bias is negative because real logic levels are not ideal: a "0" sits a few to tens of millivolts above ground and a "1" a little below VDD. Each such input turns the next gate's OFF transistor slightly <em>on</em> (exponentially, through V<sub>GS</sub>), so the real circuit leaks more than a table of ideal-input gates predicts. The bias grows with temperature, from about −1 % below 0 °C to about −5 % above 80 °C, because the level shifts grow with leakage.</p>
+<div class="box ours"><div class="box-title">The proof, and the fix</div>
+<p>When the same transistor models are run on the adder's real node voltages ("flat ML"), the error is 0.7 % median with essentially zero bias. So the remaining error belongs to the ideal-level hierarchy, not to the ML. The levels-aware hierarchy solves those real levels with the ML models instead of taking them from SPICE, and reaches the same accuracy (0.66 % median) with no SPICE input at all.</p></div>
