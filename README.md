@@ -1,6 +1,6 @@
 # Leaky Lima — ML-driven PVT-aware leakage estimation
 
-DVD course project, Team 1: Shriya Kansal, Udhav Malpani, Samyak Soni, Satvik Srivastava. Assignment: **16nm HP PTM card, VDD = 1.0 V, 3-bit carry-lookahead adder**.
+DVD course project, Team 1: Shriya Kansal, Udhav Malpani, Samyak Soni, Satvik Shrivastava. Assignment: **16nm HP PTM card, VDD = 1.0 V, 3-bit carry-lookahead adder**.
 
 Four ML transistor models (NMOS/PMOS × ON/OFF) predict Id, Ig, Is, Ib under
 process / voltage / temperature variation. They are composed into gate leakage
@@ -98,4 +98,4 @@ work/                      scratch netlists / raw ngspice output (not tracked)
 | SPICE setup, data generation, data check | Samyak Soni |
 | Transistor ML models, training, ablation, learning guide | Udhav Malpani |
 | Gate and circuit validation, ML node-voltage solver, tests | Shriya Kansal |
-| Parity-checker validation, extra analyses, report | Satvik Srivastava |
+| Parity-checker validation, extra analyses, report | Satvik Shrivastava |
